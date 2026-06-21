@@ -21,17 +21,14 @@ namespace Zavrsni.ViewModels
         public VaultViewModel(IEventAggregator eventaggregator, CryptoService cryptoService)
         {
             _cts = new CancellationTokenSource();
-            es = new EncryptionService(this);
-            ChosenFilepath = null;
-            CanCancel = false;
             _eventAggregator = eventaggregator;
             _cryptoService = cryptoService;
 
-            // postavi derivirani kljuc iz CryptoService na EncryptionService
-            if (_cryptoService.DerivedKey != null)
-            {
-                es.SetKey(_cryptoService.DerivedKey);
-            }
+            // EncryptionService prima CryptoService za PQC operacije (ML-KEM/ML-DSA)
+            // DEK više nije fiksni sesijski ključ — dobija se per-file iz EncapsulateForFile/DecapsulateForFile
+            es = new EncryptionService(this, _cryptoService);
+            ChosenFilepath = null;
+            CanCancel = false;
         }
 
         public string? ChosenFilepath

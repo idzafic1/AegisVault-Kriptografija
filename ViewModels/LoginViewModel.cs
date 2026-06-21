@@ -9,8 +9,19 @@ namespace Zavrsni.ViewModels
     {
         private readonly IEventAggregator _eventAggregator;
         private readonly CryptoService _cryptoService;
-
-        public string Password { get; set; } = string.Empty;
+        private string _password = string.Empty;
+        public string Password
+        {
+            get => _password;
+            set
+            {
+                if (_password != value)
+                {
+                    _password = value;
+                    NotifyOfPropertyChange(nameof(Password));
+                }
+            }
+        }
 
         // IsBusy — true dok Argon2id derivacija traje (1-2 sekunde)
         // UI treba prikazati spinner ili indeterminate progress bar

@@ -10,9 +10,35 @@ namespace Zavrsni.ViewModels
         private readonly IEventAggregator _eventAggregator;
         private readonly CryptoService _cryptoService;
 
+        private string _password = string.Empty;
+        public string Password
+        {
+            get => _password;
+            set
+            {
+                if (_password != value)
+                {
+                    _password = value;
+                    NotifyOfPropertyChange(nameof(Password));
+                }
+            }
+        }
 
-        public string Password { get; set; } = string.Empty;
-        public string ConfirmPassword { get; set; } = string.Empty;
+        private string _confirmPassword = string.Empty;
+        public string ConfirmPassword
+        {
+            get => _confirmPassword;
+            set
+            {
+                if (_confirmPassword != value)
+                {
+                    _confirmPassword = value;
+                    NotifyOfPropertyChange(nameof(ConfirmPassword));
+                }
+            }
+        }
+
+
 
         // IsBusy — true dok Argon2id derivacija traje (1-2 sekunde)
         public bool IsBusy
@@ -58,6 +84,7 @@ namespace Zavrsni.ViewModels
 
             if (string.IsNullOrWhiteSpace(Password))
             {
+                System.Diagnostics.Debug.WriteLine("empty password for some reason");
                 ErrorMessage = "Password cannot be empty!";
                 Debug.WriteLine("Password cannot be empty!");
                 return;

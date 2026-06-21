@@ -4,6 +4,8 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
              xmlns:local="clr-namespace:Zavrsni.Views"
+
+             xmlns:helpers="clr-namespace:Zavrsni.Helpers"
              mc:Ignorable="d" 
              d:DesignHeight="480" d:DesignWidth="640">
     <Grid>
@@ -23,7 +25,9 @@
             <!-- Password -->
             <TextBlock Text="PASSWORD" FontSize="11" FontWeight="SemiBold"
                        Foreground="#9AA1AC" Margin="0,0,0,6" />
-            <PasswordBox x:Name="Password"
+            <PasswordBox x:Name="PasswordView"
+                         helpers:PasswordHelper.Attach="True"
+                         helpers:PasswordHelper.Password="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          Padding="8,6"
                          FontSize="13"
                          Background="#22262E"
@@ -35,7 +39,9 @@
             <!-- Confirm Password -->
             <TextBlock Text="CONFIRM PASSWORD" FontSize="11" FontWeight="SemiBold"
                        Foreground="#9AA1AC" Margin="0,0,0,6" />
-            <PasswordBox x:Name="ConfirmPassword"
+            <PasswordBox x:Name="ConfirmPasswordView"
+                         helpers:PasswordHelper.Attach="True"
+                         helpers:PasswordHelper.Password="{Binding ConfirmPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          Padding="8,6"
                          FontSize="13"
                          Background="#22262E"
