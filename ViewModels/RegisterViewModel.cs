@@ -102,7 +102,7 @@ namespace Zavrsni.ViewModels
             try
             {
                 Debug.WriteLine("Register attempted.");
-                bool success = await _cryptoService.Register(Password);
+                bool success = await _cryptoService.RegisterAsync(Password);
 
                 if (success)
                 {

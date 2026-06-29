@@ -1,32 +1,26 @@
 using Caliburn.Micro;
 using Microsoft.Win32;
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Text;
-
+using System.Threading;
+using System.Threading.Tasks;
+using Zavrsni.Events;
 using Zavrsni.Services;
 
 namespace Zavrsni.ViewModels
 {
     public class VaultViewModel : Screen, IProgress<int>
     {
-        private CancellationTokenSource _cts;
+        private CancellationTokenSource? _cts;
+        private readonly EncryptionService _encryptionService;
+        private readonly IEventAggregator _eventAggregator;
+        private readonly CryptoService _cryptoService;
 
-        private EncryptionService es;
-
-        private IEventAggregator _eventAggregator;
-        private CryptoService _cryptoService;
-
-        public VaultViewModel(IEventAggregator eventaggregator, CryptoService cryptoService)
+        public VaultViewModel(IEventAggregator eventAggregator, CryptoService cryptoService)
         {
-            _cts = new CancellationTokenSource();
-            _eventAggregator = eventaggregator;
+            _eventAggregator = eventAggregator;
             _cryptoService = cryptoService;
-
-            // EncryptionService prima CryptoService za PQC operacije (ML-KEM/ML-DSA)
-            // DEK više nije fiksni sesijski ključ — dobija se per-file iz EncapsulateForFile/DecapsulateForFile
-            es = new EncryptionService(this, _cryptoService);
+            _encryptionService = new EncryptionService(this, _cryptoService);
             ChosenFilepath = null;
             CanCancel = false;
         }
@@ -47,6 +41,7 @@ namespace Zavrsni.ViewModels
         }
 
         public int ProgressBarV { get; set; }
+
         public bool CanCancel
         {
             get;
@@ -60,17 +55,6 @@ namespace Zavrsni.ViewModels
             }
         }
 
-        public string Path()
-        {
-            OpenFileDialog fileDialog = new();
-            fileDialog.Title = "Choose a file for encryption or decryption";
-            if (fileDialog.ShowDialog() == true)
-            {
-                ChosenFilepath = fileDialog.FileName;
-                return ChosenFilepath;
-            }
-            return null;
-        }
         public string? Notification
         {
             get => field;
@@ -83,22 +67,40 @@ namespace Zavrsni.ViewModels
                 }
             }
         }
+
+        public bool CanEncryptBtn => ChosenFilepath != null && !ChosenFilepath.EndsWith(".enc");
+        public bool CanDecryptBtn => ChosenFilepath != null && ChosenFilepath.EndsWith(".enc");
+
+        public string? Path()
+        {
+            OpenFileDialog fileDialog = new()
+            {
+                Title = "Choose a file for encryption or decryption"
+            };
+
+            if (fileDialog.ShowDialog() == true)
+            {
+                ChosenFilepath = fileDialog.FileName;
+                return ChosenFilepath;
+            }
+            return null;
+        }
+
         public void Cancel()
         {
             _cts?.Cancel();
         }
 
-        public bool CanEncryptBtn => ChosenFilepath != null && !ChosenFilepath.EndsWith(".enc"); // mora biti ovaj property ne mere metoda iz nekog razloga
-        public bool CanDecryptBtn => ChosenFilepath != null && ChosenFilepath.EndsWith(".enc");
-
         public async Task EncryptBtn()
         {
+            if (ChosenFilepath == null) return;
+
             _cts = new CancellationTokenSource();
             CanCancel = true;
             try
             {
                 Notification = "Started Encryption...";
-                await es.Encrypt(ChosenFilepath, _cts.Token);
+                await _encryptionService.Encrypt(ChosenFilepath, _cts.Token);
                 Notification = "Encryption completed successfully.";
             }
             catch (OperationCanceledException)
@@ -116,17 +118,19 @@ namespace Zavrsni.ViewModels
 
         public async Task DecryptBtn()
         {
+            if (ChosenFilepath == null) return;
+
             _cts = new CancellationTokenSource();
             CanCancel = true;
             try
             {
                 Notification = "Started Decryption...";
-                await es.Decrypt(ChosenFilepath, _cts.Token);
+                await _encryptionService.Decrypt(ChosenFilepath, _cts.Token);
                 Notification = "Decryption completed successfully.";
             }
             catch (OperationCanceledException)
             {
-                System.Diagnostics.Debug.WriteLine("Decryption cancelled by user.");
+                Debug.WriteLine("Decryption cancelled by user.");
                 Notification = "Decryption cancelled by user.";
             }
             finally
@@ -143,20 +147,18 @@ namespace Zavrsni.ViewModels
             NotifyOfPropertyChange(nameof(ProgressBarV));
         }
 
-        // ciscenje kljuceva iz RAM-a cim korisnik napusti Vault ekran
-        // ne oslanjamo se na GC jer je spor i nepredvidiv
-        protected override Task OnDeactivateAsync(bool close, CancellationToken cancellationToken)
+        public async Task Logout()
         {
-            // nuliranje AES-GCM kljuca u EncryptionService
-            es.ClearKey();
-
-            // nuliranje deriviranog kljuca u CryptoService
             _cryptoService.ClearSensitiveData();
-
-            System.Diagnostics.Debug.WriteLine("VaultViewModel deactivated — all keys zeroed from RAM.");
-
-            return base.OnDeactivateAsync(close, cancellationToken);
+            Debug.WriteLine("Logout — all PQC keys zeroed from RAM.");
+            await _eventAggregator.PublishOnUIThreadAsync(new NavigateToLoginEvent());
         }
 
+        protected override Task OnDeactivateAsync(bool close, CancellationToken cancellationToken)
+        {
+            _cryptoService.ClearSensitiveData();
+            Debug.WriteLine("VaultViewModel deactivated — all keys zeroed from RAM.");
+            return base.OnDeactivateAsync(close, cancellationToken);
+        }
     }
 }

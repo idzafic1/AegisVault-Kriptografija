@@ -149,6 +149,12 @@
                     Style="{StaticResource CancelButton}"
                     Width="100"
                     Margin="12,0,0,0" />
+
+            <Button x:Name="Logout"
+                    Content="Logout"
+                    Style="{StaticResource SecondaryButton}"
+                    Width="100"
+                    Margin="12,0,0,0" />
         </StackPanel>
 
         <!-- Progress -->

@@ -1,4 +1,4 @@
-#pragma warning disable SYSLIB5006 // ML-DSA is experimental in .NET 10
+﻿#pragma warning disable SYSLIB5006 // ML-DSA is experimental in .NET 10
 
 using System;
 using System.Collections.Generic;
@@ -44,7 +44,7 @@ namespace Zavrsni
         }
         protected override void OnStartup(object sender, StartupEventArgs e)
         {
-            // KORAK 1: Provjera da platforma podržava post-kvantnu kriptografiju
+            // KORAK 1: Provjera da platforma podrzava post-kvantnu kriptografiju
             // ML-KEM i ML-DSA zahtijevaju Windows Insiders Canary Channel Build 27852+
             if (!MLKem.IsSupported || !MLDsa.IsSupported)
             {
@@ -57,3 +57,4 @@ namespace Zavrsni
         }
     }
 }
+

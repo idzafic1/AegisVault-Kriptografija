@@ -13,32 +13,34 @@ namespace Zavrsni.Services
 {
     public class CryptoService
     {
-        private static readonly string KeyStoreFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "FileVaultKeys");
-
-        private static readonly string KeyStorePath = Path.Combine(KeyStoreFolder, "vault.keystore");
-
-        // vault.keystore binarni format:
-        // [4B magic "VKEY"]                                           plaintext
-        // [16B salt]                                                  plaintext
-        // [12B nonce][16B tag][14B ciphertext]      verification       ciphertext
-        // [12B nonce][16B tag][4B len][N B ciphertext]  sk_kem          ciphertext
-        // [12B nonce][16B tag][4B len][M B ciphertext]  sk_sig          ciphertext
-        // [4B len][P B pk_kem]                                         plaintext
-        // [4B len][Q B pk_dsa]                                         plaintext
-        private static readonly byte[] Magic = Encoding.ASCII.GetBytes("VKEY");
-        private static readonly byte[] VerificationPlaintext = Encoding.UTF8.GetBytes("VAULT_VERIFIED");
-
+        // ── Konstante i staticka polja 
         private const int SALT_SIZE = 16;
         private const int NONCE_SIZE = 12;
         private const int TAG_SIZE = 16;
 
-        public byte[]? DerivedKey { get; private set; }
+        private static readonly string DefaultKeyStoreFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "FileVaultKeys");
 
-        // Sesijski PQC kljucevi — zive od Login() do ClearSensitiveData()
-        // sk_kem/sk_sig su pinovani jer GC inace moze premjestiti niz u memoriji
-        // ostavljajuci kopiju na staroj adresi koju ZeroMemory ne bi obrisao
+        private static readonly string DefaultKeyStorePath = Path.Combine(DefaultKeyStoreFolder, "vault.keystore");
+
+        internal static string? _testKeyStoreFolder;
+        internal static string? _testKeyStorePath;
+
+        // vault.keystore format:
+        // [4B magic "VKEY"]
+        // [16B salt]
+        // [12B nonce][16B tag][14B ciphertext]      verification
+        // [12B nonce][16B tag][4B len][N B ciphertext]  sk_kem
+        // [12B nonce][16B tag][4B len][M B ciphertext]  sk_sig
+        // [4B len][P B pk_kem]
+        // [4B len][Q B pk_dsa]
+        private static readonly byte[] Magic = Encoding.ASCII.GetBytes("VKEY");
+        private static readonly byte[] VerificationPlaintext = Encoding.UTF8.GetBytes("VAULT_VERIFIED");
+
+        // ── Privatna polja (Sesijski kljucevi) 
+        // Sk_kem i sk_sig se pinuju kako bi sprijecili GC da ih premjesti u memoriji,
+        // sto bi ostavilo kopiju kljuca na staroj adresi koju ZeroMemory ne bi dohvatio.
         private MLKem? _kemDecapsulationKey;
         private MLDsa? _dsaSigningKey;
         private byte[]? _pkKemBytes;
@@ -50,11 +52,16 @@ namespace Zavrsni.Services
         private bool _skKemPinned;
         private bool _skSigPinned;
 
-        // True nakon uspjesnog Login(), false nakon ClearSensitiveData()
+        // ── Svojstva 
+        private static string KeyStoreFolder => _testKeyStoreFolder ?? DefaultKeyStoreFolder;
+        private static string KeyStorePath => _testKeyStorePath ?? DefaultKeyStorePath;
+
+        public byte[]? DerivedKey { get; private set; }
+
         public bool IsReady => _kemDecapsulationKey != null && _dsaSigningKey != null;
 
-        // Argon2id KDF - CPU-bound, ~1-2s sa 64MB memorije.
-        // GetBytesAsync interno koristi Task.Run
+        // ── Javne metode 
+
         public static async Task<byte[]> DeriveKekAsync(string password, byte[] salt)
         {
             byte[] pass = Encoding.UTF8.GetBytes(password);
@@ -67,8 +74,7 @@ namespace Zavrsni.Services
                 Salt = salt
             };
 
-            byte[] kek = await argon2.GetBytesAsync(32).ConfigureAwait(false);
-            return kek;
+            return await argon2.GetBytesAsync(32).ConfigureAwait(false);
         }
 
         public static byte[] GenerateSalt()
@@ -80,20 +86,7 @@ namespace Zavrsni.Services
 
         public static bool IsRegistered() => File.Exists(KeyStorePath);
 
-        private static void WipeOldUserData()
-        {
-            if (File.Exists(KeyStorePath)) File.Delete(KeyStorePath);
-
-            string encryptedFolder = EncryptionService.GetSecureStorageFolder();
-            if (Directory.Exists(encryptedFolder))
-            {
-                foreach (string file in Directory.GetFiles(encryptedFolder, "*.enc"))
-                    File.Delete(file);
-            }
-        }
-
-        // REGISTER - generisanje PQC kljuceva + enkriptovanje sa KEK
-        public async Task<bool> Register(string password)
+        public async Task<bool> RegisterAsync(string password)
         {
             if (IsRegistered())
             {
@@ -104,17 +97,15 @@ namespace Zavrsni.Services
             byte[] salt = GenerateSalt();
             byte[] kek = await DeriveKekAsync(password, salt).ConfigureAwait(false);
 
-            // Verifikacioni string - sluzi za provjeru passworda pri Login()
-            byte[] nonce_verification = new byte[NONCE_SIZE];
-            byte[] tag_verification = new byte[TAG_SIZE];
-            byte[] ciphertext_verification = new byte[VerificationPlaintext.Length];
-            RandomNumberGenerator.Fill(nonce_verification);
+            byte[] nonceVerification = new byte[NONCE_SIZE];
+            byte[] tagVerification = new byte[TAG_SIZE];
+            byte[] ciphertextVerification = new byte[VerificationPlaintext.Length];
+            RandomNumberGenerator.Fill(nonceVerification);
 
             using var aesForVerification = new AesGcm(kek, TAG_SIZE);
-            aesForVerification.Encrypt(nonce_verification, VerificationPlaintext, ciphertext_verification, tag_verification);
+            aesForVerification.Encrypt(nonceVerification, VerificationPlaintext, ciphertextVerification, tagVerification);
 
-            // MLKem/MLDsa key generation je CPU-bound
-            // Task.Run signalizira da ovo pripada thread poolu
+            // MLKem/MLDsa generisanje kljuceva je CPU-bound, Task.Run ga prebacuje na thread pool
             var (kemKey, dsaKey) = await Task.Run(() =>
             {
                 var kem = MLKem.GenerateKey(MLKemAlgorithm.MLKem768);
@@ -125,38 +116,36 @@ namespace Zavrsni.Services
             using (kemKey)
             using (dsaKey)
             {
-
-                byte[] nonce_kem = new byte[NONCE_SIZE];
-                byte[] tag_kem = new byte[TAG_SIZE];
+                byte[] nonceKem = new byte[NONCE_SIZE];
+                byte[] tagKem = new byte[TAG_SIZE];
                 byte[] skKem = kemKey.ExportDecapsulationKey();
-                byte[] encrypted_sk_kem = new byte[skKem.Length];
-                RandomNumberGenerator.Fill(nonce_kem);
+                byte[] encryptedSkKem = new byte[skKem.Length];
+                RandomNumberGenerator.Fill(nonceKem);
 
                 byte[] pkKem = kemKey.ExportEncapsulationKey();
                 using (var aesForKem = new AesGcm(kek, TAG_SIZE))
-                    aesForKem.Encrypt(nonce_kem, skKem, encrypted_sk_kem, tag_kem);
+                    aesForKem.Encrypt(nonceKem, skKem, encryptedSkKem, tagKem);
                 CryptographicOperations.ZeroMemory(skKem);
 
                 byte[] pkDsa = dsaKey.ExportSubjectPublicKeyInfo();
 
-                byte[] nonce_dsa = new byte[NONCE_SIZE];
-                byte[] tag_dsa = new byte[TAG_SIZE];
+                byte[] nonceDsa = new byte[NONCE_SIZE];
+                byte[] tagDsa = new byte[TAG_SIZE];
                 byte[] skSig = dsaKey.ExportPkcs8PrivateKey();
-                byte[] encrypted_sk_sig = new byte[skSig.Length];
-                RandomNumberGenerator.Fill(nonce_dsa);
+                byte[] encryptedSkSig = new byte[skSig.Length];
+                RandomNumberGenerator.Fill(nonceDsa);
 
                 using (var aesForDsa = new AesGcm(kek, TAG_SIZE))
-                    aesForDsa.Encrypt(nonce_dsa, skSig, encrypted_sk_sig, tag_dsa);
+                    aesForDsa.Encrypt(nonceDsa, skSig, encryptedSkSig, tagDsa);
                 CryptographicOperations.ZeroMemory(skSig);
 
-                // Sastavi cijeli keystore u jedan bafer, pa jedan WriteAsync poziv
                 if (!Directory.Exists(KeyStoreFolder))
                     Directory.CreateDirectory(KeyStoreFolder);
 
                 int totalSize = Magic.Length + SALT_SIZE
                     + NONCE_SIZE + TAG_SIZE + VerificationPlaintext.Length
-                    + NONCE_SIZE + TAG_SIZE + 4 + encrypted_sk_kem.Length
-                    + NONCE_SIZE + TAG_SIZE + 4 + encrypted_sk_sig.Length
+                    + NONCE_SIZE + TAG_SIZE + 4 + encryptedSkKem.Length
+                    + NONCE_SIZE + TAG_SIZE + 4 + encryptedSkSig.Length
                     + 4 + pkKem.Length
                     + 4 + pkDsa.Length;
 
@@ -168,19 +157,19 @@ namespace Zavrsni.Services
 
                 WriteBytes(Magic);
                 WriteBytes(salt);
-                WriteBytes(nonce_verification);
-                WriteBytes(tag_verification);
-                WriteBytes(ciphertext_verification);
+                WriteBytes(nonceVerification);
+                WriteBytes(tagVerification);
+                WriteBytes(ciphertextVerification);
 
-                WriteBytes(nonce_kem);
-                WriteBytes(tag_kem);
-                WriteInt32(encrypted_sk_kem.Length);
-                WriteBytes(encrypted_sk_kem);
+                WriteBytes(nonceKem);
+                WriteBytes(tagKem);
+                WriteInt32(encryptedSkKem.Length);
+                WriteBytes(encryptedSkKem);
 
-                WriteBytes(nonce_dsa);
-                WriteBytes(tag_dsa);
-                WriteInt32(encrypted_sk_sig.Length);
-                WriteBytes(encrypted_sk_sig);
+                WriteBytes(nonceDsa);
+                WriteBytes(tagDsa);
+                WriteInt32(encryptedSkSig.Length);
+                WriteBytes(encryptedSkSig);
 
                 WriteInt32(pkKem.Length);
                 WriteBytes(pkKem);
@@ -193,8 +182,7 @@ namespace Zavrsni.Services
                 await fs.FlushAsync(CancellationToken.None).ConfigureAwait(false);
             }
 
-            // KEK je KRATKOTRAJAN — zeriran cim zavrsi upis. Ne cuva se kao polje klase
-            // jer u PQC flowu DEK dolazi per-file iz ML-KEM, ne iz deriviranog kljuca.
+            // KEK se zerira odmah, jer PQC tok obezbjedjuje DEK po fajlu iz ML-KEM
             CryptographicOperations.ZeroMemory(kek);
             DerivedKey = null;
 
@@ -202,7 +190,7 @@ namespace Zavrsni.Services
             return true;
         }
 
-        public async Task<bool> Login(string password)
+        public async Task<bool> LoginAsync(string password)
         {
             if (!IsRegistered())
             {
@@ -210,7 +198,6 @@ namespace Zavrsni.Services
                 return false;
             }
 
-            // Citaj cijeli keystore u memoriju jednim ReadAsync pozivom
             byte[] data;
             using (var fs = new FileStream(KeyStorePath, FileMode.Open, FileAccess.Read,
                 FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan))
@@ -220,30 +207,27 @@ namespace Zavrsni.Services
             }
 
             int pos = 0;
-            // da olaksamo sebi zivot malo
             Span<byte> ReadSpan(int count) { var s = data.AsSpan(pos, count); pos += count; return s; }
             int ReadInt32() { int v = BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(pos)); pos += 4; return v; }
 
-            // Magic
             if (!ReadSpan(4).SequenceEqual(Magic))
             {
                 Debug.WriteLine("Invalid keystore format — magic bytes do not match.");
                 return false;
             }
 
-            // password true?
             byte[] salt = ReadSpan(SALT_SIZE).ToArray();
-            byte[] nonce_v = ReadSpan(NONCE_SIZE).ToArray();
-            byte[] tag_v = ReadSpan(TAG_SIZE).ToArray();
-            byte[] ct_v = ReadSpan(VerificationPlaintext.Length).ToArray();
+            byte[] nonceV = ReadSpan(NONCE_SIZE).ToArray();
+            byte[] tagV = ReadSpan(TAG_SIZE).ToArray();
+            byte[] ctV = ReadSpan(VerificationPlaintext.Length).ToArray();
 
             byte[] kek = await DeriveKekAsync(password, salt).ConfigureAwait(false);
 
-            byte[] decrypted = new byte[ct_v.Length];
+            byte[] decrypted = new byte[ctV.Length];
             try
             {
                 using var aes = new AesGcm(kek, TAG_SIZE);
-                aes.Decrypt(nonce_v, ct_v, tag_v, decrypted);
+                aes.Decrypt(nonceV, ctV, tagV, decrypted);
             }
             catch (AuthenticationTagMismatchException)
             {
@@ -262,37 +246,35 @@ namespace Zavrsni.Services
             }
             CryptographicOperations.ZeroMemory(decrypted);
 
-            // Citaj enkriptovane privatne kljuceve
-            byte[] nonce_kem = ReadSpan(NONCE_SIZE).ToArray();
-            byte[] tag_kem = ReadSpan(TAG_SIZE).ToArray();
-            int len_sk_kem = ReadInt32();
-            byte[] enc_sk_kem = ReadSpan(len_sk_kem).ToArray();
+            byte[] nonceKem = ReadSpan(NONCE_SIZE).ToArray();
+            byte[] tagKem = ReadSpan(TAG_SIZE).ToArray();
+            int lenSkKem = ReadInt32();
+            byte[] encSkKem = ReadSpan(lenSkKem).ToArray();
 
-            byte[] nonce_dsa = ReadSpan(NONCE_SIZE).ToArray();
-            byte[] tag_dsa = ReadSpan(TAG_SIZE).ToArray();
-            int len_sk_dsa = ReadInt32();
-            byte[] enc_sk_sig = ReadSpan(len_sk_dsa).ToArray();
+            byte[] nonceDsa = ReadSpan(NONCE_SIZE).ToArray();
+            byte[] tagDsa = ReadSpan(TAG_SIZE).ToArray();
+            int lenSkDsa = ReadInt32();
+            byte[] encSkSig = ReadSpan(lenSkDsa).ToArray();
 
-            int len_pk_kem = ReadInt32();
-            byte[] pk_kem = ReadSpan(len_pk_kem).ToArray();
+            int lenPkKem = ReadInt32();
+            byte[] pkKem = ReadSpan(lenPkKem).ToArray();
 
-            int len_pk_dsa = ReadInt32();
-            byte[] pk_dsa = ReadSpan(len_pk_dsa).ToArray();
+            int lenPkDsa = ReadInt32();
+            byte[] pkDsa = ReadSpan(lenPkDsa).ToArray();
 
- 
-            // sk_kem: dekriptuj → pinuj ODMAH, prije nego se predje na sk_sig
-            byte[] skKemPlain = new byte[len_sk_kem];
+            // Dekripcija se odvija kljuc po kljuc, uz trenutno pinovanje u memoriji
+            byte[] skKemPlain = new byte[lenSkKem];
             using (var aesKem = new AesGcm(kek, TAG_SIZE))
-                aesKem.Decrypt(nonce_kem, enc_sk_kem, tag_kem, skKemPlain);
+                aesKem.Decrypt(nonceKem, encSkKem, tagKem, skKemPlain);
 
             _skKemBytes = skKemPlain;
             _skKemHandle = GCHandle.Alloc(_skKemBytes, GCHandleType.Pinned);
+            Debug.WriteLine($"sk_kem adresa: 0x{_skKemHandle.AddrOfPinnedObject():X}");
             _skKemPinned = true;
 
-            // sk_sig: dekriptuj → pinuj ODMAH — sk_kem je vec siguran u ovom trenutku
-            byte[] skSigPlain = new byte[len_sk_dsa];
+            byte[] skSigPlain = new byte[lenSkDsa];
             using (var aesDsa = new AesGcm(kek, TAG_SIZE))
-                aesDsa.Decrypt(nonce_dsa, enc_sk_sig, tag_dsa, skSigPlain);
+                aesDsa.Decrypt(nonceDsa, encSkSig, tagDsa, skSigPlain);
 
             _skSigBytes = skSigPlain;
             _skSigHandle = GCHandle.Alloc(_skSigBytes, GCHandleType.Pinned);
@@ -301,8 +283,8 @@ namespace Zavrsni.Services
             _kemDecapsulationKey = MLKem.ImportDecapsulationKey(MLKemAlgorithm.MLKem768, _skKemBytes);
             _dsaSigningKey = MLDsa.ImportPkcs8PrivateKey(_skSigBytes);
 
-            _pkKemBytes = pk_kem;
-            _pkDsaBytes = pk_dsa;
+            _pkKemBytes = pkKem;
+            _pkDsaBytes = pkDsa;
 
             CryptographicOperations.ZeroMemory(kek);
             DerivedKey = null;
@@ -311,19 +293,6 @@ namespace Zavrsni.Services
             return true;
         }
 
-        private static async Task ReadExactAsync(Stream s, byte[] buf, int count, CancellationToken ct)
-        {
-            int read = await s.ReadAtLeastAsync(buf.AsMemory(0, count), count, false, ct)
-                .ConfigureAwait(false);
-            if (read < count)
-                throw new InvalidDataException($"Corrupted keystore — expected {count}B, got {read}B.");
-        }
-
-
-
-        /// ML-KEM encapsulacija — kreira per-file DEK
-        /// dekPlaintext je KRATKOTRAJAN — pozivatelj MORA zerirati nakon upotrebe
-        // CryptoService — vrati i handle, ne samo niz:
         public (byte[] dekPlaintext, byte[] dekCiphertext, GCHandle dekHandle) EncapsulateForFile()
         {
             if (_pkKemBytes == null)
@@ -332,24 +301,21 @@ namespace Zavrsni.Services
             using var senderKeys = MLKem.ImportEncapsulationKey(MLKemAlgorithm.MLKem768, _pkKemBytes);
             senderKeys.Encapsulate(out byte[] dekCiphertext, out byte[] dekPlaintext);
 
-            var handle = GCHandle.Alloc(dekPlaintext, GCHandleType.Pinned);  // pinuj PRIJE return-a sto je sigurno sigurno je
-            // uistinu GC moze ovo samo pomjereiti nebitno koliko kratko ovo trajalo moze se u random trenucima smao aktivirati
+            var handle = GCHandle.Alloc(dekPlaintext, GCHandleType.Pinned);
             return (dekPlaintext, dekCiphertext, handle);
         }
 
-        /// ML-KEM decapsulacija — rekonstruise per-file DEK
-        public (byte[] dekPlaintext, GCHandle dekHandle) DecapsulateForFile(byte[] dekCiphertext)
+        public virtual (byte[] dekPlaintext, GCHandle dekHandle) DecapsulateForFile(byte[] dekCiphertext)
         {
             if (_kemDecapsulationKey == null)
                 throw new InvalidOperationException("PQC keys not loaded. Login first.");
 
             byte[] dekPlaintext = _kemDecapsulationKey.Decapsulate(dekCiphertext);
-            var handle = GCHandle.Alloc(dekPlaintext, GCHandleType.Pinned); // pinuj PRIJE return-a
+            var handle = GCHandle.Alloc(dekPlaintext, GCHandleType.Pinned);
 
             return (dekPlaintext, handle);
         }
 
-        /// ML-DSA-65 potpis (Encrypt-then-Sign)
         public byte[] SignData(byte[] data)
         {
             if (_dsaSigningKey == null)
@@ -358,8 +324,6 @@ namespace Zavrsni.Services
             return _dsaSigningKey.SignData(data, null);
         }
 
-        /// ML-DSA-65 verifikacija MORA se pozvati PRIJE DecapsulateForFile
-        /// privatni KEM kljuc se ne koristi za fajlove sa nevalidnim potpisom
         public bool VerifySignature(byte[] data, byte[] signature)
         {
             if (_pkDsaBytes == null)
@@ -369,7 +333,6 @@ namespace Zavrsni.Services
             return publicKey.VerifyData(data, signature, null);
         }
 
-        // Iznimno bitna redoslijed ZeroMemory pa Free
         public void ClearSensitiveData()
         {
             if (DerivedKey != null)
@@ -404,6 +367,28 @@ namespace Zavrsni.Services
             _pkDsaBytes = null;
 
             Debug.WriteLine("ClearSensitiveData — all PQC keys zeroed, pins freed, instances disposed.");
+        }
+
+        // ── Privatne metode 
+
+        private static void WipeOldUserData()
+        {
+            if (File.Exists(KeyStorePath)) File.Delete(KeyStorePath);
+
+            string encryptedFolder = EncryptionService.GetSecureStorageFolder();
+            if (Directory.Exists(encryptedFolder))
+            {
+                foreach (string file in Directory.GetFiles(encryptedFolder, "*.enc"))
+                    File.Delete(file);
+            }
+        }
+
+        private static async Task ReadExactAsync(Stream s, byte[] buf, int count, CancellationToken ct)
+        {
+            int read = await s.ReadAtLeastAsync(buf.AsMemory(0, count), count, false, ct)
+                .ConfigureAwait(false);
+            if (read < count)
+                throw new InvalidDataException($"Corrupted keystore — expected {count}B, got {read}B.");
         }
     }
 }

@@ -12,46 +12,38 @@ namespace Zavrsni.Services
 {
     public class EncryptionService
     {
+        // ── Konstante ──────────────────────────────────────────────────
         private const int NONCE_SIZE = 12;
         private const int TAG_SIZE = 16;
         private const int CHUNK_SIZE = 4 * 1024 * 1024;
-        private const int HEADER_SIZE = NONCE_SIZE + TAG_SIZE; // 28B per-chunk overhead (nonce + tag)
-        private const int ML_DSA_65_SIG_SIZE = 3309;           // ML-DSA-65 fiksna velicina potpisa
-        private const int HASH_BUF_SIZE = 81920;               // 80KB buffer za hash verification prolaz
-
-        private readonly IProgress<int>? _progress;
-        private readonly CryptoService _cryptoService;
-        private byte[]? _key; // LEGACY — za ClearKey() kompatibilnost
-
+        private const int HEADER_SIZE = NONCE_SIZE + TAG_SIZE;
+        private const int ML_DSA_65_SIG_SIZE = 3309;
+        private const int HASH_BUF_SIZE = 81920;
         private const string FolderName = "FileVault";
 
+        // ── Fieldi ─────────────────────────────────────────────────────
+        private readonly IProgress<int>? _progress;
+        private readonly CryptoService _cryptoService;
+
+        internal static string? _testStorageFolder;
+
+        // ── Konstruktor ────────────────────────────────────────────────
         public EncryptionService(IProgress<int> Progress, CryptoService cryptoService)
         {
             _progress = Progress;
             _cryptoService = cryptoService;
         }
 
-        public void SetKey(byte[] key) => _key = key;
-
-        public void ClearKey()
-        {
-            if (_key != null)
-            {
-                CryptographicOperations.ZeroMemory(_key);
-                _key = null;
-            }
-        }
-
-        // ENCRYPT — Encrypt-then-Sign
-        // .enc: [4B dekCt.Len][dekCt][4B sig.Len][sig][4B meta.Len][nonce|tag|metaCt][nonce|tag|chunkCt]
-        // Potpis: SHA-256(dekCiphertext || svi enkriptovani bajtovi) -> ML-DSA-65
+        // ── Encrypt — Encrypt-then-Sign 
+        // .enc format:
+        //   [4B dekCt.Len][dekCt][4B sig.Len][sig][4B meta.Len][nonce|tag|metaCt][nonce|tag|chunkCt]...
+        // Potpis pokriva SHA-256(dekCiphertext || svi enkriptovani bajtovi) → ML-DSA-65
         public async Task Encrypt(string filepath, CancellationToken ct)
         {
             if (!_cryptoService.IsReady)
                 throw new InvalidOperationException("PQC keys not loaded. Login first.");
 
-            // Zero-allocation bufferi (ArrayPool) sprecavaju LOH fragmentaciju
-            // zbog vecih fajlova, mora se vratiti u finally bloku
+            // ArrayPool sprecava LOH fragmentaciju za velike fajlove
             byte[] chunkBuf = ArrayPool<byte>.Shared.Rent(CHUNK_SIZE);
             byte[] writeBuf = ArrayPool<byte>.Shared.Rent(HEADER_SIZE + CHUNK_SIZE);
 
@@ -66,12 +58,11 @@ namespace Zavrsni.Services
 
                 string output = GetNewEncryptionPath();
 
-                // DEK nam tek sad treba, pa se tek sad i generise
                 dekData = _cryptoService.EncapsulateForFile();
                 using var aes = new AesGcm(dekData.dekPlaintext, TAG_SIZE);
 
-                // AesGcm konstruktor KOPIRA kljuc u native CNG kontekst.
-                // Managed plaintext niz nam vise ne treba, mozemo ga odmah zerirati i osloboditi.
+                // AesGcm konstruktor kopira kljuc u native CNG kontekst —
+                // managed niz vise nije potreban, zeriramo ga odmah
                 CryptographicOperations.ZeroMemory(dekData.dekPlaintext);
                 dekData.dekHandle.Free();
                 dekHandleFreed = true;
@@ -106,7 +97,6 @@ namespace Zavrsni.Services
                 await fsOut.WriteAsync(writeBuf.AsMemory(0, metaTotal), ct).ConfigureAwait(false);
                 hash.AppendData(writeBuf, 0, metaTotal);
 
-                // Direktno pisanje AES izlaza u writeBuf izbjegava nepotrebne memorijske alokacije
                 int read;
                 while ((read = await fsIn.ReadAsync(chunkBuf.AsMemory(0, CHUNK_SIZE), ct)
                     .ConfigureAwait(false)) > 0)
@@ -153,10 +143,10 @@ namespace Zavrsni.Services
             }
         }
 
-
-        // DECRYPT — Verify-before-Decrypt (dva prolaza)
-        // 1) SHA-256 hash svih enkriptovanih bajtova -> VerifySignature
-        // 2) Seek nazad -> AES-GCM streaming dekripcija
+        // ── Decrypt — Verify-before-Decrypt (dva prolaza) 
+        // 1. prolaz: SHA-256 hash svih enkriptovanih bajtova → VerifySignature
+        // 2. prolaz: Seek nazad → AES-GCM streaming dekripcija
+        // Privatni KEM kljuc se nikada ne koristi za fajlove sa nevalidnim potpisom.
         public async Task Decrypt(string filepath, CancellationToken ct)
         {
             if (!_cryptoService.IsReady)
@@ -195,8 +185,8 @@ namespace Zavrsni.Services
                     .ConfigureAwait(false)) > 0)
                     hash.AppendData(hashBuf, 0, read);
 
-                // Verifikacija se provodi eksplicitno prije dekapsulacije
-                // kako se privatni KEM kljuc nikada ne bi izlozio korumpiranom ciphertextu
+                // Verifikacija PRIJE dekapsulacije — privatni KEM kljuc
+                // se nikada ne izlaze korumpiranom ciphertextu
                 if (!_cryptoService.VerifySignature(hash.GetHashAndReset(), signature))
                     throw new CryptographicException(
                         "Signature verification failed — file tampered or not signed by this vault.");
@@ -215,8 +205,7 @@ namespace Zavrsni.Services
                 fsIn.Seek(posAfterHeader, SeekOrigin.Begin);
                 using var aes = new AesGcm(dekData.dekPlaintext, TAG_SIZE);
 
-                // Isti princip kao Encrypt -- AesGcm konstruktor kopira kljuc u CNG,
-                // managed niz vise nije potreban
+                // AesGcm konstruktor kopira kljuc u CNG managed niz zeriramo odmah
                 CryptographicOperations.ZeroMemory(dekData.dekPlaintext);
                 dekData.dekHandle.Free();
                 dekHandleFreed = true;
@@ -270,6 +259,7 @@ namespace Zavrsni.Services
             }
         }
 
+        // ── Privatne metode 
         private static async Task ReadExactAsync(Stream s, byte[] buf, int count, CancellationToken ct)
         {
             int read = await s.ReadAtLeastAsync(buf.AsMemory(0, count), count, false, ct)
@@ -278,97 +268,14 @@ namespace Zavrsni.Services
                 throw new InvalidDataException($"Corrupted .enc — expected {count}B, got {read}B.");
         }
 
-        // ============================================================
-        // [LEGACY] Zakomentarisano dok se ne potvrdi da PQC flow radi.
-        // Prethodni AES-GCM streaming bez ML-KEM/ML-DSA.
-        // ============================================================
-
-        /*
-        public static async Task Encryption(byte[] Key, string filepath, IProgress<int> progress, CancellationToken ct)
-        {
-            byte[] filepathBytes = Encoding.UTF8.GetBytes(Path.GetFileName(filepath));
-            byte[] filepathLength = BitConverter.GetBytes((ushort)filepathBytes.Length);
-            string output = GetNewEncryptionPath();
-            int NONCE_SIZE = 12;
-            int TAG_SIZE = 16;
-            int CHUNK_SIZE = 4 * 1024 * 1024;
-            using AesGcm instance = new AesGcm(Key, TAG_SIZE);
-            using FileStream fsRead = new FileStream(filepath, FileMode.Open, FileAccess.Read, FileShare.None, 4096, FileOptions.Asynchronous);
-            using FileStream fsWrite = new FileStream(output, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
-            byte[] buffer = new byte[CHUNK_SIZE];
-            byte[] nonce = new byte[NONCE_SIZE];
-            byte[] tag = new byte[TAG_SIZE];
-            byte[] metadata = new byte[2 + filepathBytes.Length];
-            int progressCalc = 0;
-            int read;
-            byte[] writeBuffer = new byte[TAG_SIZE + NONCE_SIZE + CHUNK_SIZE];
-            RandomNumberGenerator.Fill(nonce);
-            filepathLength.CopyTo(metadata, 0);
-            filepathBytes.CopyTo(metadata, 2);
-            instance.Encrypt(nonce, metadata, metadata, tag, null);
-            BitConverter.GetBytes((int)metadata.Length).CopyTo(writeBuffer.AsSpan(0, sizeof(int)));
-            nonce.CopyTo(writeBuffer.AsSpan(sizeof(int), NONCE_SIZE));
-            tag.CopyTo(writeBuffer.AsSpan(NONCE_SIZE + sizeof(int), TAG_SIZE));
-            metadata.CopyTo(writeBuffer.AsSpan(NONCE_SIZE + TAG_SIZE + sizeof(int), metadata.Length));
-            await fsWrite.WriteAsync(writeBuffer.AsMemory(0, (int)(NONCE_SIZE + TAG_SIZE + sizeof(int) + metadata.Length)), ct);
-            while ((read = await fsRead.ReadAsync(buffer, 0, buffer.Length, ct)) > 0)
-            {
-                ct.ThrowIfCancellationRequested();
-                RandomNumberGenerator.Fill(nonce);
-                var chunk = new Span<byte>(buffer, 0, (int)(read));
-                instance.Encrypt(nonce, chunk, chunk, tag, null);
-                nonce.CopyTo(writeBuffer.AsSpan(0, NONCE_SIZE));
-                tag.CopyTo(writeBuffer.AsSpan(NONCE_SIZE, TAG_SIZE));
-                chunk.CopyTo(writeBuffer.AsSpan(NONCE_SIZE + TAG_SIZE, (int)read));
-                await fsWrite.WriteAsync(writeBuffer.AsMemory(0, (int)(NONCE_SIZE + TAG_SIZE + read)), ct);
-                progressCalc = (int)(((double)fsRead.Position / fsRead.Length) * 100);
-                progress.Report(progressCalc);
-            }
-        }
-
-        public static async Task Decryption(byte[] key, string filepath, IProgress<int> progress, CancellationToken ct)
-        {
-            int read;
-            int TAG_SIZE = 16, NONCE_SIZE = 12, CHUNK_SIZE = 4 * 1024 * 1024;
-            string output = "";
-            using FileStream fsRead = new FileStream(filepath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
-            using AesGcm instance = new AesGcm(key, TAG_SIZE);
-            byte[] tmpBuffer = new byte[CHUNK_SIZE + TAG_SIZE + NONCE_SIZE];
-            byte[] metadaLen = new byte[sizeof(int)];
-            read = await fsRead.ReadAtLeastAsync(metadaLen.AsMemory(0, sizeof(int)), sizeof(int), false, ct);
-            if (read < sizeof(int)) throw new InvalidDataException("File is corrupted or not in the expected format.");
-            int velicina = BitConverter.ToInt32(metadaLen, 0);
-            read = await fsRead.ReadAtLeastAsync(tmpBuffer.AsMemory(0, velicina + NONCE_SIZE + TAG_SIZE), velicina + NONCE_SIZE + TAG_SIZE, false, ct);
-            if (read < velicina + NONCE_SIZE + TAG_SIZE) throw new InvalidDataException("File is corrupted or not in the expected format.");
-            var metadaCiphertext = tmpBuffer.AsSpan(NONCE_SIZE + TAG_SIZE, velicina);
-            var nonce1 = tmpBuffer.AsSpan(0, NONCE_SIZE);
-            var tag1 = tmpBuffer.AsSpan(NONCE_SIZE, TAG_SIZE);
-            instance.Decrypt(nonce1, metadaCiphertext, tag1, metadaCiphertext, null);
-            ushort filepathLength = BitConverter.ToUInt16(metadaCiphertext.Slice(0, 2));
-            string extractedFileName = Encoding.UTF8.GetString(metadaCiphertext.Slice(2, filepathLength));
-            output = Path.Combine(GetSecureStorageFolder(), extractedFileName);
-            using FileStream fsWrite = new FileStream(output, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
-            int progressCalc = 0;
-            while (fsRead.Position < fsRead.Length)
-            {
-                ct.ThrowIfCancellationRequested();
-                read = await fsRead.ReadAsync(tmpBuffer, 0, tmpBuffer.Length, ct);
-                if (read < NONCE_SIZE + TAG_SIZE)
-                    throw new InvalidDataException("File is corrupted or not in the expected format.");
-                var readSpan = tmpBuffer.AsSpan(0, (int)read);
-                var nonce = readSpan.Slice(0, NONCE_SIZE);
-                var tag = readSpan.Slice(NONCE_SIZE, TAG_SIZE);
-                var chunkSpan = readSpan.Slice(NONCE_SIZE + TAG_SIZE);
-                instance.Decrypt(nonce, chunkSpan, tag, chunkSpan, null);
-                await fsWrite.WriteAsync(tmpBuffer.AsMemory(NONCE_SIZE + TAG_SIZE, chunkSpan.Length), ct);
-                progressCalc = (int)(((double)fsRead.Position / fsRead.Length) * 100);
-                progress.Report(progressCalc);
-            }
-        }
-        */
-
         public static string GetSecureStorageFolder()
         {
+            if (_testStorageFolder != null)
+            {
+                if (!Directory.Exists(_testStorageFolder)) Directory.CreateDirectory(_testStorageFolder);
+                return _testStorageFolder;
+            }
+
             string path = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), FolderName);
             if (!Directory.Exists(path)) Directory.CreateDirectory(path);

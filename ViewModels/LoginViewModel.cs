@@ -71,7 +71,7 @@ namespace Zavrsni.ViewModels
             {
                 Debug.WriteLine("Login attempted.");
 
-                bool success = await _cryptoService.Login(Password);
+                bool success = await _cryptoService.LoginAsync(Password);
                 if (success)
                 {
                     Debug.WriteLine("Login successful — publishing OpenVaultEvent.");

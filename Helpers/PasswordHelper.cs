@@ -1,11 +1,11 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 
 namespace Zavrsni.Helpers
 {
     /// <summary>
     /// Attached property helper za WPF PasswordBox binding.
-    /// PasswordBox.Password nije DependencyProperty pa ne podržava MVVM data binding.
+    /// PasswordBox.Password nije DependencyProperty pa ne podrzava MVVM data binding.
     /// Ovaj helper registruje AttachedProperty koji hvata PasswordChanged event
     /// i sinhronizuje vrijednost sa ViewModelom putem TwoWay bindinga.
     /// </summary>
@@ -70,3 +70,4 @@ namespace Zavrsni.Helpers
         }
     }
 }
+
