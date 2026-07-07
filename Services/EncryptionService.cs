@@ -12,22 +12,22 @@ namespace Zavrsni.Services
 {
     public class EncryptionService
     {
-        // ── Konstante ──────────────────────────────────────────────────
+        // ── Konstante 
         private const int NONCE_SIZE = 12;
         private const int TAG_SIZE = 16;
-        private const int CHUNK_SIZE = 4 * 1024 * 1024;
+        private const int CHUNK_SIZE = 8 * 1024 * 1024;
         private const int HEADER_SIZE = NONCE_SIZE + TAG_SIZE;
         private const int ML_DSA_65_SIG_SIZE = 3309;
         private const int HASH_BUF_SIZE = 81920;
         private const string FolderName = "FileVault";
 
-        // ── Fieldi ─────────────────────────────────────────────────────
+        // ── Fieldi 
         private readonly IProgress<int>? _progress;
         private readonly CryptoService _cryptoService;
 
         internal static string? _testStorageFolder;
 
-        // ── Konstruktor ────────────────────────────────────────────────
+        // ── Konstruktor 
         public EncryptionService(IProgress<int> Progress, CryptoService cryptoService)
         {
             _progress = Progress;

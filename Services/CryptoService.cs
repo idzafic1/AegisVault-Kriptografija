@@ -52,15 +52,12 @@ namespace Zavrsni.Services
         private bool _skKemPinned;
         private bool _skSigPinned;
 
-        // ── Svojstva 
         private static string KeyStoreFolder => _testKeyStoreFolder ?? DefaultKeyStoreFolder;
         private static string KeyStorePath => _testKeyStorePath ?? DefaultKeyStorePath;
 
         public byte[]? DerivedKey { get; private set; }
 
         public bool IsReady => _kemDecapsulationKey != null && _dsaSigningKey != null;
-
-        // ── Javne metode 
 
         public static async Task<byte[]> DeriveKekAsync(string password, byte[] salt)
         {
